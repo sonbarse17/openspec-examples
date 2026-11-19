@@ -1,0 +1,31 @@
+environment     = "prod"
+project         = "myapp"
+location        = "centralindia"                         # TODO confirm region
+subscription_id = "00000000-0000-0000-0000-000000000000" # TODO per-env subscription
+tags = {
+  owner       = "platform-team" # TODO
+  cost_center = "CC-0000"       # TODO
+}
+allowed_client_cidrs      = ["10.0.0.0/8"]                                 # TODO corporate/VPN ranges
+tls_certificate_secret_id = "https://TODO.vault.azure.net/secrets/agw-tls" # upload cert first, see README
+db_admin = {
+  object_id      = "00000000-0000-0000-0000-000000000000" # TODO Entra group
+  name           = "db-admins"
+  principal_type = "Group"
+}
+app_sku                  = "P2v3"
+app_instances            = 2
+zone_redundant           = true
+db_sku                   = "GP_Standard_D4ds_v5"
+db_storage_mb            = 131072
+db_backup_retention_days = 35
+db_geo_redundant_backup  = true
+db_high_availability     = true
+waf_mode                 = "Prevention"
+gateway_min_capacity     = 2
+gateway_max_capacity     = 10
+log_retention_days       = 180
+alert_emails             = ["oncall@example.com"] # TODO
+alert_webhook_uris       = []                     # TODO pager webhook
+alert_severity           = 1
+enable_locks             = true

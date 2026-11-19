@@ -1,0 +1,19 @@
+name: Rollback
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [staging, production]
+        required: true
+      image_tag:
+        description: Previously published image tag (commit SHA)
+        required: true
+
+jobs:
+  rollback:
+    uses: ./.github/workflows/_deploy-env.yml
+    with:
+      environment: ${{ inputs.environment }}
+      image_tag: ${{ inputs.image_tag }}
+    secrets: inherit

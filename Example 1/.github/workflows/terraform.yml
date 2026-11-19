@@ -1,0 +1,52 @@
+name: terraform
+
+on:
+  pull_request:
+    paths: ["infra/**"]
+  push:
+    branches: [main]
+    paths: ["infra/**"]
+
+permissions:
+  id-token: write # OIDC
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: infra } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate
+      - run: for e in dev uat prod; do terraform test -var-file=envs/$e.tfvars; done
+      - uses: terraform-linters/setup-tflint@v4
+      - run: tflint --init && tflint --recursive
+      - uses: bridgecrewio/checkov-action@v12
+        with: { directory: infra, framework: terraform, quiet: true }
+
+  # Sequential promotion; each GitHub Environment holds its own OIDC client id/tenant/subscription.
+  # Configure "required reviewers" on the prod Environment = manual approval before apply.
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: checks
+    strategy:
+      max-parallel: 1
+      matrix: { env: [dev, uat, prod] }
+    runs-on: ubuntu-latest # use a self-hosted VNet runner if state/KV are firewalled to it
+    environment: ${{ matrix.env }}
+    defaults: { run: { working-directory: infra } }
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_use_oidc: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform init -reconfigure -backend-config=envs/${{ matrix.env }}.backend.hcl
+      - run: terraform plan -var-file=envs/${{ matrix.env }}.tfvars -out=tfplan
+      - run: terraform apply tfplan

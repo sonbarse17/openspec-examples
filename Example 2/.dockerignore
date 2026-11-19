@@ -1,0 +1,6 @@
+.git
+.github
+openspec
+tests
+__pycache__
+*.db

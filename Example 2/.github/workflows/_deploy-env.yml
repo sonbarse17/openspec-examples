@@ -1,0 +1,81 @@
+# Reusable: migrate, deploy, health-check, auto-rollback for ONE environment.
+name: Deploy environment
+on:
+  workflow_call:
+    inputs:
+      environment: { required: true, type: string }
+      image_tag:   { required: true, type: string }
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}   # production has required reviewers
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      AWS_REGION: us-east-1
+      CLUSTER: ${{ vars.ECS_CLUSTER }}
+      SERVICE: ${{ vars.ECS_SERVICE }}
+      SUBNETS: ${{ vars.TASK_SUBNETS }}
+      SECURITY_GROUPS: ${{ vars.TASK_SECURITY_GROUPS }}
+      HEALTH_URL: ${{ vars.HEALTH_URL }}
+      REGISTRY_IMAGE: ${{ vars.ECR_REGISTRY }}/app:${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Record current task definition (rollback target)
+        run: |
+          prev=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --query 'services[0].taskDefinition' --output text)
+          echo "PREV_TASK_DEF=$prev" >> "$GITHUB_ENV"
+
+      - name: Render new task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "$PREV_TASK_DEF" \
+            --query taskDefinition > td.json
+          jq --arg img "$REGISTRY_IMAGE" \
+            'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)
+             | .containerDefinitions[0].image = $img' td.json > td-new.json
+          new=$(aws ecs register-task-definition --cli-input-json file://td-new.json \
+            --query taskDefinition.taskDefinitionArn --output text)
+          echo "NEW_TASK_DEF=$new" >> "$GITHUB_ENV"
+
+      - name: Run database migrations
+        run: |
+          arn=$(aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+            --task-definition "$NEW_TASK_DEF" \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SECURITY_GROUPS]}" \
+            --overrides '{"containerOverrides":[{"name":"app","command":["alembic","upgrade","head"]}]}' \
+            --query 'tasks[0].taskArn' --output text)
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$arn"
+          code=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$arn" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          [ "$code" = "0" ] || { echo "migration failed (exit $code)"; exit 1; }
+
+      - name: Deploy
+        id: deploy
+        run: |
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
+            --task-definition "$NEW_TASK_DEF" >/dev/null
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+
+      - name: Health check
+        run: scripts/health-check.sh "$HEALTH_URL" 10 15
+
+      # Only after the service was switched; a failed migration leaves the old version serving.
+      - name: Roll back to previous task definition
+        if: failure() && steps.deploy.outcome != 'skipped'
+        run: |
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" \
+            --task-definition "$PREV_TASK_DEF" >/dev/null
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          scripts/health-check.sh "$HEALTH_URL" 10 15
